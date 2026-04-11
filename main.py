@@ -829,15 +829,6 @@ if __name__ == "__main__":
         print(i, len(path))
         acc_path.extend(time_optimal_steer_2d_vlim([path[i].x, path[i].y, 0, 0], [path[i+1].x, path[i+1].y, 0, 0], [-0.2, -0.2], [0.2, 0.2]))
 
-    # pos_path = [[path[0].x, path[0].y, 0, 0]]
-    # for i in range(len(acc_path)):
-    #     pos_path.append(integrate_control_2d(pos_path[i], acc_path[i]))
-
-    # print(len(acc_path), acc_path)
-    # print(len(pos_path), pos_path)
-    # print(len(path), path)
-
-
     def no_collision(x0, controls, world):
         x1 = integrate_control_2d(x0, controls)
         A = Point(x0[0], x0[1])

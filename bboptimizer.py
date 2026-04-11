@@ -4,7 +4,7 @@ from bbsteer import *
 
 # Cola com o código original do bang_bang que já tens
 
-def bb_optimizer(xinit, controls, world, collision_check_fn, max_iter=500, min_improvement=0.1, patience=50):
+def bb_optimizer(xinit, controls, world, collision_check_fn, max_iter=500, min_improvement=0.1, patience=50, umin = None, umax = None):
     """
     Bang-bang trajectory optimizer (Secção IV-B do artigo LaValle et al. 2023).
 
@@ -19,8 +19,11 @@ def bb_optimizer(xinit, controls, world, collision_check_fn, max_iter=500, min_i
     Returns:
         controls optimizados
     """
-    umin = [-1.0, -1.0]
-    umax = [1.0, 1.0]
+    if umin is None:
+        umin = [-0.2, -0.2]
+    if umax is None:
+        umax = [0.2, 0.2]
+
 
     best = [c[:] for c in controls]
     no_improve = 0

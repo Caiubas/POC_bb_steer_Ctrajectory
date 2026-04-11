@@ -484,7 +484,7 @@ def bang_bang_optimal_vlim(ix, iv, gx, gv, umin=-1.0, umax=1.0, vmin=-1.0, vmax=
     return result if result else c
 
 
-def time_optimal_steer_2d_vlim(xinit, xgoal, umin=(-1, -1), umax=(1, 1), vmax=1):
+def time_optimal_steer_2d_vlim(xinit, xgoal, umin=(-1, -1), umax=(1, 1), vmax=3):
     """
     Versão de time_optimal_steer_2d com limite de velocidade escalar vmax.
     A velocidade em cada eixo é limitada individualmente de forma conservadora:
