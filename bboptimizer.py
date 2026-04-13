@@ -7,20 +7,16 @@ def check_segment_collision(x0, controls, collision_check_fn, world, dt=0.05):
     state = list(x0)
     for seg in controls:
         u, seg_t = seg[0], seg[1]
-        elapsed = 0.0
-        while elapsed < seg_t:
-            step = min(dt, seg_t - elapsed)
-            new_state = [
-                state[0] + state[2]*step + 0.5*u[0]*step**2,
-                state[1] + state[3]*step + 0.5*u[1]*step**2,
-                state[2] + u[0]*step,
-                state[3] + u[1]*step,
-            ]
-            if not collision_check_fn([state[0], state[1], state[2], state[3]],
-                                       [[u, step]], world):
-                return False
-            state = new_state
-            elapsed += step
+        new_state = [
+            state[0] + state[2]*seg_t + 0.5*u[0]*seg_t**2,
+            state[1] + state[3]*seg_t + 0.5*u[1]*seg_t**2,
+            state[2] + u[0]*seg_t,
+            state[3] + u[1]*seg_t,
+        ]
+        if not collision_check_fn([state[0], state[1], state[2], state[3]],
+                                       [[u, seg_t]], world):
+            return False
+        state = new_state
     return True
 
 def halton(index, base):
@@ -78,6 +74,7 @@ def bb_optimizer(xinit, controls, world, collision_check_fn, vmax, umin=(-0.2, -
 
         if not collision_check_fn(x_t1, new_mid, world):
             continue
+
 
         if not check_segment_collision(x_t1, new_mid, collision_check_fn, dt=0.05, world=world):
             continue

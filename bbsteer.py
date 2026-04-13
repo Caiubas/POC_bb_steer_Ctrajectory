@@ -52,49 +52,6 @@ Note: This does not use the O(n lg n) time sweeping method described in the IROS
 '''
 
 
-def time_optimal_steer(xinit, xgoal, umin=0, umax=0):
-    n = int(0.5 * len(xinit))
-    if umin == 0:
-        umin = [-1.0] * n
-    if umax == 0:
-        umax = [1.0] * n
-    cvec = []
-    tvec = []
-    tmax = 0.0
-    imax = 0
-    for i in range(n):
-
-        cvec.append(bang_bang_optimal(xinit[i], xinit[n + i], xgoal[i], xgoal[n + i], umin[i], umax[i]))
-        tvec.append(control_time(cvec[i]))
-
-        if tvec[i] > tmax:
-            tmax = tvec[i]
-            imax = i
-    i = 0
-    restart = False
-
-    while i < n:
-        if i != imax and fabs(tvec[i] - tmax) > time_epsilon:
-            c = bang_bang_scaled(xinit[i], xinit[n + i], xgoal[i], xgoal[n + i], tmax, umin[i], umax[i])
-            if c == []:
-                c = bang_bang_hard_stop_wait(xinit[i], xinit[n + i], xgoal[i], xgoal[n + i], tmax, umin[i], umax[i])
-                # print("Bang failure",i)
-            if c == []:
-                c = bang_bang_hard_stop(xinit[i], xinit[n + i], xgoal[i], xgoal[n + i], umin[i], umax[i])
-                tmax = control_time(c)
-                imax = i
-                restart = True
-                # print("Bang double failure",i,"new max time",tmax)
-            cvec[i] = c
-            tvec[i] = control_time(c)
-            if restart == True:
-                i = -1
-        i += 1
-
-    cv = merge_scalar_controls(cvec)
-    return cv
-
-
 '''
 This is a faster version of time_optimal_steer for the special case of two double integrators. 
 '''
@@ -165,19 +122,6 @@ def integrate_control_2d(xi, con):
         y += ydot * c[1] + 0.5 * c[0][1] * c[1] ** 2
         ydot += c[0][1] * c[1]
     return (x, y, xdot, ydot)
-
-
-def integrate_control_nd(xinit, con):
-    n = int(0.5 * len(xinit))
-    xn = []
-    for i in range(len(xinit)):
-        xn.append(xinit[i])
-    # print("xn",xn,"\n\ncon",con)
-    for c in con:
-        for i in range(n):
-            xn[i] += xn[n + i] * c[1] + 0.5 * c[0][i] * c[1] ** 2
-            xn[n + i] += c[0][i] * c[1]
-    return xn
 
 
 def merge_vector_scalar_controls(c1, c2):
@@ -311,20 +255,6 @@ def bang_bang_optimal(ix, iv, gx, gv, umin=-1.0, umax=1.0):
         return [[u1, t1]]
 
     return [[u1, t1], [u2, t2]]
-
-
-def test_bang_bang_optimal():
-    for i in range(1000):
-        xinit = (0.0, 0.0, random.random() * 20.0 - 10.0, random.random() * 20.0 - 10.0)
-        c = []
-        for j in range(random.randint(1, 10)):
-            c.append([[random.random() * 2.0 - 1.0, random.random() * 2.0 - 1.0], random.random() * 5.0])
-        ttc = control_time(c)
-        xgoal = integrate_control_2d(xinit, c)
-        copt = time_optimal_steer_2d(xinit, xgoal)
-        ttcopt = control_time(copt)
-        if ttcopt > ttc:
-            print("Bad optimization", ttc, ttcopt)
 
 
 # Returns empty control if it fails

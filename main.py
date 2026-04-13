@@ -11,6 +11,8 @@ Classes:
 from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
+from datetime import time
+from time import perf_counter
 from typing import Optional
 
 import numpy as np
@@ -507,6 +509,8 @@ class World:
 
     def is_free_path(self, a: Point, b: Point) -> bool:
         """Retorna True se o segmento AB não interceptar nenhum obstáculo."""
+        if not self.boundaries.do_contain_the_point(a) or not self.boundaries.do_contain_the_point(b):
+            return False
         for obs in self.obstacles:
             if obs.is_intercepted_by(a, b) or obs.do_contain_the_point(a) or obs.do_contain_the_point(b):
                 return False
@@ -784,26 +788,121 @@ class PathPlanner:
 # Exemplo de uso / demonstração
 # ---------------------------------------------------------------------------
 
+import random
+
+def random_point_in_bounds(boundaries: Quadrilateral) -> Point:
+    xs = [v.x for v in boundaries.vertices]
+    ys = [v.y for v in boundaries.vertices]
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    return Point(
+        random.uniform(min_x, max_x),
+        random.uniform(min_y, max_y)
+    )
+
+def generate_far_points(boundaries: Quadrilateral, margin_ratio=0.1):
+    xs = [v.x for v in boundaries.vertices]
+    ys = [v.y for v in boundaries.vertices]
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    width = max_x - min_x
+    height = max_y - min_y
+
+    margin_x = width * margin_ratio
+    margin_y = height * margin_ratio
+
+    # escolhe eixo principal (horizontal ou vertical)
+    if random.random() < 0.5:
+        # esquerda vs direita
+        point_a = Point(
+            random.uniform(min_x, min_x + margin_x),
+            random.uniform(min_y, max_y)
+        )
+        point_b = Point(
+            random.uniform(max_x - margin_x, max_x),
+            random.uniform(min_y, max_y)
+        )
+    else:
+        # baixo vs cima
+        point_a = Point(
+            random.uniform(min_x, max_x),
+            random.uniform(min_y, min_y + margin_y)
+        )
+        point_b = Point(
+            random.uniform(min_x, max_x),
+            random.uniform(max_y - margin_y, max_y)
+        )
+
+    return point_a, point_b
+
+
+def generate_random_world(
+    boundaries: Quadrilateral,
+    n_circles: int,
+    n_quads: int,
+    n_stadiums: int
+):
+    obstacles: list[Obstacle] = []
+
+    xs = [v.x for v in boundaries.vertices]
+    ys = [v.y for v in boundaries.vertices]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    width = max_x - min_x
+    height = max_y - min_y
+
+    # -------- Circles --------
+    for _ in range(n_circles):
+        center = random_point_in_bounds(boundaries)
+        radius = random.uniform(0.02, 0.08) * min(width, height)
+
+        obstacles.append(
+            Circle(center=center, radius=radius)
+        )
+
+    # -------- Quadrilaterals --------
+    for _ in range(n_quads):
+        cx, cy = random_point_in_bounds(boundaries).x, random_point_in_bounds(boundaries).y
+
+        w = random.uniform(0.05, 0.15) * width
+        h = random.uniform(0.05, 0.15) * height
+
+        quad = Quadrilateral(vertices=[
+            Point(cx - w/2, cy - h/2),
+            Point(cx + w/2, cy - h/2),
+            Point(cx + w/2, cy + h/2),
+            Point(cx - w/2, cy + h/2),
+        ])
+
+        obstacles.append(quad)
+
+    # -------- Stadiums --------
+    for _ in range(n_stadiums):
+        p1 = random_point_in_bounds(boundaries)
+        p2 = random_point_in_bounds(boundaries)
+
+        radius = random.uniform(0.02, 0.06) * min(width, height)
+
+        obstacles.append(
+            Stadium(vertices=[p1, p2], radius=radius)
+        )
+
+    # -------- Points A e B --------
+    point_a, point_b = generate_far_points(boundaries)
+
+    return point_a, point_b, obstacles
+
 if __name__ == "__main__":
     # Cria um mundo com alguns obstáculos
     vmax = 3
-    umax = [0.2, 0.2]
-    umin = [-0.2, -0.2]
-    vi = [-0.5, -0.5]
-    point_a = Point(1, 1)
-    point_b = Point(11.0, 9.0)
-
-    obstacles: list[Obstacle] = [
-        Circle(center=Point(3.0, 2.0), radius=0.8),
-        Circle(center=Point(6.0, 4.0), radius=1.0),
-        Quadrilateral(vertices=[
-            Point(1.5, 5.0),
-            Point(3.5, 3.0),
-            Point(3.5, 7.0),
-            Point(1.5, 7.0),
-        ]),
-        Stadium(vertices=[Point(7.0, 1.0), Point(9.0, 3.0)], radius=0.6),
-    ]
+    umax = [0.1, 0.1]
+    umin = [-0.1, -0.1]
+    vi = [0, 0]
 
     boundaries = Quadrilateral(vertices=[
         Point(0.0, 0.0),
@@ -812,8 +911,22 @@ if __name__ == "__main__":
         Point(0.0, 10.0),
     ])
 
-    world = World(obstacles=obstacles, boundaries=boundaries)
+    point_a, point_b, obstacles = generate_random_world(
+        boundaries,
+        n_circles=8,
+        n_quads=2,
+        n_stadiums=2
+    )
 
+    print(point_a, point_b)
+    print(len(obstacles))
+
+    import plot
+    from bboptimizer import bb_optimizer
+    world = World(obstacles=obstacles, boundaries=boundaries)
+    plot.plot_world_and_path(world, [])
+
+    time_start = perf_counter()
     planner = PathPlanner(world=world, max_iterations=500)
     path = planner.plan(point_a, point_b)
 
@@ -825,27 +938,25 @@ if __name__ == "__main__":
     else:
         print("Nenhum caminho encontrado.")
 
-    import plot
-    plot.plot_world_and_path(world, path)
+
+
 
     acc_path = []
     state = list([point_a.x, point_a.y, vi[0], vi[1]])
     for i in range(len(path) - 1):
         xg = [path[i + 1].x, path[i + 1].y, 0, 0]
-        seg = time_optimal_steer_2d(state, xg, (-0.2, -0.2), (0.2, 0.2))
+        seg = time_optimal_steer_2d_vlim(state, xg, umin=umin, umax=umax, vmax=vmax)
         acc_path.extend(seg)
         state = list(integrate_control_2d(state, seg))
 
     def no_collision(x0, controls, world):
         x1 = integrate_control_2d(x0, controls)
-        print("x0: ", x0)
-        print("x1: ", x1)
         A = Point(x0[0], x0[1])
         B = Point(x1[0], x1[1])
         return world.is_free_path(A, B)
 
 
-    from bboptimizer import bb_optimizer
+
 
     # Optimiza
     optimized = bb_optimizer(
@@ -872,7 +983,13 @@ if __name__ == "__main__":
         pos_path.append(Point(state[0], state[1]))
     pos_path[0] = Point(pos_path[0][0], pos_path[0][1])
 
+    time_end = perf_counter()
+
+    print("tempo:", time_end - time_start)
+
     print(pos_and_acc)
+
+    plot.plot_world_and_path(world, path)
     plot.plot_world_and_path(world, pos_path)
 
     xinit = [point_a.x, point_a.y, vi[0], vi[1]]
