@@ -508,7 +508,7 @@ class World:
     def is_free_path(self, a: Point, b: Point) -> bool:
         """Retorna True se o segmento AB não interceptar nenhum obstáculo."""
         for obs in self.obstacles:
-            if obs.is_intercepted_by(a, b):
+            if obs.is_intercepted_by(a, b) or obs.do_contain_the_point(a) or obs.do_contain_the_point(b):
                 return False
         return True
 
@@ -786,6 +786,13 @@ class PathPlanner:
 
 if __name__ == "__main__":
     # Cria um mundo com alguns obstáculos
+    vmax = 3
+    umax = [0.2, 0.2]
+    umin = [-0.2, -0.2]
+    vi = [-0.5, -0.5]
+    point_a = Point(1, 1)
+    point_b = Point(11.0, 9.0)
+
     obstacles: list[Obstacle] = [
         Circle(center=Point(3.0, 2.0), radius=0.8),
         Circle(center=Point(6.0, 4.0), radius=1.0),
@@ -807,12 +814,9 @@ if __name__ == "__main__":
 
     world = World(obstacles=obstacles, boundaries=boundaries)
 
-    # Define pontos de início e fim
-    point_a = Point(0.5, 0.5)
-    point_b = Point(11.0, 9.0)
-
     planner = PathPlanner(world=world, max_iterations=500)
     path = planner.plan(point_a, point_b)
+
 
     if path:
         print("Caminho encontrado:")
@@ -825,36 +829,59 @@ if __name__ == "__main__":
     plot.plot_world_and_path(world, path)
 
     acc_path = []
-    for i in range(len(path)-1):
-        print(i, len(path))
-        acc_path.extend(time_optimal_steer_2d_vlim([path[i].x, path[i].y, 0, 0], [path[i+1].x, path[i+1].y, 0, 0], [-0.2, -0.2], [0.2, 0.2]))
+    state = list([point_a.x, point_a.y, vi[0], vi[1]])
+    for i in range(len(path) - 1):
+        xg = [path[i + 1].x, path[i + 1].y, 0, 0]
+        seg = time_optimal_steer_2d(state, xg, (-0.2, -0.2), (0.2, 0.2))
+        acc_path.extend(seg)
+        state = list(integrate_control_2d(state, seg))
 
     def no_collision(x0, controls, world):
         x1 = integrate_control_2d(x0, controls)
+        print("x0: ", x0)
+        print("x1: ", x1)
         A = Point(x0[0], x0[1])
         B = Point(x1[0], x1[1])
         return world.is_free_path(A, B)
 
 
     from bboptimizer import bb_optimizer
+
     # Optimiza
     optimized = bb_optimizer(
-        xinit=[path[0].x, path[0].y, 0, 0],
+        xinit=[path[0].x, path[0].y, vi[0], vi[1]],
         controls=acc_path,
         world=world,
+        vmax=3,
         collision_check_fn=no_collision,
         max_iter=500,
-        patience=50
+        patience=50,
+        umax=umax,
+        umin=umin
     )
 
     print("Tempo original:", control_time(acc_path))
     print("Tempo optimizado:", control_time(optimized))
 
     pos_path = [[path[0].x, path[0].y, 0, 0]]
-    state = [path[0].x, path[0].y, 0, 0]
+    pos_and_acc = [[path[0].x, path[0].y], (vi[0]**2 + vi[1]**2)**0.5]
+    state = [path[0].x, path[0].y, vi[0], vi[1]]
     for seg in optimized:
         state = list(integrate_control_2d(state, [seg]))  # passa [seg] em vez de seg
+        pos_and_acc.append([[state[0], state[1]], (state[2]**2 + state[3]**2)**0.5])
         pos_path.append(Point(state[0], state[1]))
     pos_path[0] = Point(pos_path[0][0], pos_path[0][1])
 
+    print(pos_and_acc)
     plot.plot_world_and_path(world, pos_path)
+
+    xinit = [point_a.x, point_a.y, vi[0], vi[1]]
+    xgoal = [point_b.x, point_b.y, 0, 0]
+
+    xfinal = integrate_control_2d(xinit, optimized)
+
+    print("inicial esperado:", xinit)
+    print("final esperado:  ", xgoal)
+    print("final obtido:    ", xfinal)
+    print("erro posição:    ", abs(xfinal[0] - xgoal[0]), abs(xfinal[1] - xgoal[1]))
+    print("erro velocidade: ", abs(xfinal[2] - xgoal[2]), abs(xfinal[3] - xgoal[3]))
