@@ -256,6 +256,56 @@ def bang_bang_optimal(ix, iv, gx, gv, umin=-1.0, umax=1.0):
 
     return [[u1, t1], [u2, t2]]
 
+def bang_bang_scaled_vlim(ix, iv, gx, gv, tf, umin=-1.0, umax=1.0, vmin=-1.0, vmax=1.0):
+    # Tenta sempre a quadrática primeiro — é o caso geral
+    # u_acc/u_dec dependem da direcção do movimento
+    for u_acc, u_dec in [(umax, umin), (umin, umax)]:
+        if fabs(u_acc) < float_epsilon or fabs(u_dec) < float_epsilon:
+            continue
+
+        a = 1.0 / u_acc
+        b = 1.0 / u_dec
+
+        A_coef = 0.5 * (b - a)
+        B_coef = tf + iv * a - gv * b
+        C_coef = ix - 0.5 * iv**2 * a + 0.5 * gv**2 * b - gx
+
+        if fabs(A_coef) < float_epsilon:
+            if fabs(B_coef) < float_epsilon:
+                continue
+            vc_candidates = [-C_coef / B_coef]
+        else:
+            disc = B_coef**2 - 4 * A_coef * C_coef
+            if disc < 0:
+                continue
+            sq = sqrt(disc)
+            vc_candidates = [(-B_coef + sq) / (2 * A_coef),
+                             (-B_coef - sq) / (2 * A_coef)]
+
+        for vc in vc_candidates:
+            if vc < vmin - time_epsilon or vc > vmax + time_epsilon:
+                continue
+            t_acc_v = (vc - iv) * a
+            t_dec_v = (gv - vc) * b
+            t_cr_v  = tf - t_acc_v - t_dec_v
+            if t_acc_v < -time_epsilon or t_dec_v < -time_epsilon or t_cr_v < -time_epsilon:
+                continue
+            t_acc_v = max(0.0, t_acc_v)
+            t_dec_v = max(0.0, t_dec_v)
+            t_cr_v  = max(0.0, t_cr_v)
+            segs = []
+            if t_acc_v > time_epsilon:
+                segs.append([u_acc, t_acc_v])
+            if t_cr_v > time_epsilon:
+                segs.append([0.0, t_cr_v])
+            if t_dec_v > time_epsilon:
+                segs.append([u_dec, t_dec_v])
+            if segs:
+                return segs
+
+    # Fallback: sem limite de velocidade (vc pode exceder vmax, mas é o melhor possível)
+    return bang_bang_scaled(ix, iv, gx, gv, tf, umin, umax)
+
 
 # Returns empty control if it fails
 def bang_bang_scaled(ix, iv, gx, gv, tf, umin=-1.0, umax=1.0):
@@ -435,12 +485,12 @@ def time_optimal_steer_2d_vlim(xinit, xgoal, umin=(-1, -1), umax=(1, 1), vmax=3)
     # O resto é igual ao time_optimal_steer_2d original
     if fabs(t1 - t2) > time_epsilon:
         if t1 < t2:
-            c1 = bang_bang_scaled(xinit[0], xinit[2], xgoal[0], xgoal[2], t2, umin[0], umax[0])
+            c1 = bang_bang_scaled_vlim(xinit[0], xinit[2], xgoal[0], xgoal[2], t2, umin[0], umax[0], vmax=vmax_per_axis, vmin=vmin_per_axis)
             if c1 == []:
                 c1 = bang_bang_hard_stop(xinit[0], xinit[2], xgoal[0], xgoal[2], umin[0], umax[0])
                 tt1 = control_time(c1)
                 if tt1 > t2:
-                    c2 = bang_bang_scaled(xinit[1], xinit[3], xgoal[1], xgoal[3], tt1, umin[1], umax[1])
+                    c2 = bang_bang_scaled_vlim(xinit[1], xinit[3], xgoal[1], xgoal[3], tt1, umin[1], umax[1], vmax=vmax_per_axis, vmin=vmin_per_axis)
                     if c2 == []:
                         c2 = bang_bang_hard_stop(xinit[1], xinit[3], xgoal[1], xgoal[3], umin[1], umax[1])
                         tt2 = control_time(c2)
@@ -451,12 +501,12 @@ def time_optimal_steer_2d_vlim(xinit, xgoal, umin=(-1, -1), umax=(1, 1), vmax=3)
                 else:
                     c1 = bang_bang_hard_stop_wait(xinit[0], xinit[2], xgoal[0], xgoal[2], t2, umin[0], umax[0])
         else:
-            c2 = bang_bang_scaled(xinit[1], xinit[3], xgoal[1], xgoal[3], t1, umin[1], umax[1])
+            c2 = bang_bang_scaled_vlim(xinit[1], xinit[3], xgoal[1], xgoal[3], t1, umin[1], umax[1], vmax=vmax_per_axis, vmin=vmin_per_axis)
             if c2 == []:
                 c2 = bang_bang_hard_stop(xinit[1], xinit[3], xgoal[1], xgoal[3], umin[1], umax[1])
                 tt2 = control_time(c2)
                 if tt2 > t1:
-                    c1 = bang_bang_scaled(xinit[0], xinit[2], xgoal[0], xgoal[2], tt2, umin[0], umax[0])
+                    c1 = bang_bang_scaled_vlim(xinit[0], xinit[2], xgoal[0], xgoal[2], tt2, umin[0], umax[0], vmax=vmax_per_axis, vmin=vmin_per_axis)
                     if c1 == []:
                         c1 = bang_bang_hard_stop(xinit[0], xinit[2], xgoal[0], xgoal[2], umin[0], umax[0])
                         tt1 = control_time(c1)

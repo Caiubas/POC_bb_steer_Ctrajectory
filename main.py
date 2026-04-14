@@ -11,13 +11,10 @@ Classes:
 from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
-from datetime import time
 from time import perf_counter
 from typing import Optional
 
-import numpy as np
-
-from bbsteer import time_optimal_steer_2d, integrate_control_2d, control_time, time_optimal_steer_2d_vlim
+from bbsteer import integrate_control_2d, control_time, time_optimal_steer_2d_vlim
 
 
 # ---------------------------------------------------------------------------
@@ -79,11 +76,11 @@ class Vector:
             return 0.0
         return (self.x * other.x + self.y * other.y) / n
 
-    def get_normalized(self, norm = 1.0) -> Vector:
+    def get_normalized(self) -> Vector:
         n = self.get_norm()
         if n < 1e-12:
             return Vector(0.0, 0.0)
-        return Vector(norm*self.x / n, norm*self.y / n)
+        return Vector(self.x / n, self.y / n)
 
     def get_rotated(self, angle: float) -> Vector:
         """Rotaciona o vetor em *angle* radianos (sentido anti-horário)."""
@@ -184,31 +181,43 @@ class Circle(Obstacle):
         return dist_sq <= self.radius * self.radius
 
     def get_tangent_points(self, origin: Point,
-                           margin: float = 0.2) -> list[Point]:
+                           margin: float = 0.1) -> list[Point]:
         """
         Calcula os dois pontos de tangência a partir de *origin*.
-        Os pontos são afastados da borda (margin) para garantir folga
-        suficiente em relação ao obstáculo.
+        Os pontos são gerados com raio efetivo (radius + margin).
+
+        Quando a origem está muito próxima da borda efetiva (tangent_dist < margin),
+        os tangentes seriam degenerados e o segmento origin→tangente cruzaria o
+        interior do círculo. Nesses casos, deslocamos a origem virtualmente para
+        fora (distância mínima = eff_radius + margin) antes de calcular os tangentes,
+        produzindo pontos geometricamente válidos e navegáveis.
         """
         eff_radius = self.radius + margin
         d = self.center.distance_to(origin)
 
-        if d <= eff_radius:
-            # origem dentro do círculo — retorna pontos perpendiculares à borda
-            angle = math.atan2(origin.y - self.center.y,
-                               origin.x - self.center.x)
-            r = eff_radius
-            return [
-                Point(self.center.x + r * math.cos(angle + math.pi / 2),
-                      self.center.y + r * math.sin(angle + math.pi / 2)),
-                Point(self.center.x + r * math.cos(angle - math.pi / 2),
-                      self.center.y + r * math.sin(angle - math.pi / 2)),
-            ]
+        # Origem dentro ou sobre o raio efetivo — usar origem virtual deslocada
+        if d < eff_radius:
+            d = eff_radius
+
+        # Se tangent_dist é muito pequeno, deslocar origem virtualmente para fora
+        tangent_dist_sq = d * d - eff_radius * eff_radius
+        if tangent_dist_sq < margin * margin:
+            angle_out = math.atan2(origin.y - self.center.y,
+                                   origin.x - self.center.x)
+            virtual_d = eff_radius + margin
+            virtual_origin = Point(
+                self.center.x + virtual_d * math.cos(angle_out),
+                self.center.y + virtual_d * math.sin(angle_out),
+            )
+            # Recalcular com origem virtual
+            d = virtual_d
+            tangent_dist_sq = d * d - eff_radius * eff_radius
+            origin = virtual_origin
 
         alpha = math.asin(min(1.0, eff_radius / d))
         base_angle = math.atan2(self.center.y - origin.y,
                                 self.center.x - origin.x)
-        tangent_dist = math.sqrt(max(0.0, d * d - eff_radius * eff_radius))
+        tangent_dist = math.sqrt(max(0.0, tangent_dist_sq))
 
         points = []
         for sign in (+1, -1):
@@ -509,10 +518,8 @@ class World:
 
     def is_free_path(self, a: Point, b: Point) -> bool:
         """Retorna True se o segmento AB não interceptar nenhum obstáculo."""
-        if not self.boundaries.do_contain_the_point(a) or not self.boundaries.do_contain_the_point(b):
-            return False
         for obs in self.obstacles:
-            if obs.is_intercepted_by(a, b) or obs.do_contain_the_point(a) or obs.do_contain_the_point(b):
+            if obs.is_intercepted_by(a, b):
                 return False
         return True
 
@@ -616,8 +623,11 @@ class PathPlanner:
     def __init__(self, world: World, max_iterations: int = 500) -> None:
         self.world = world
         self.max_iterations = max_iterations
-        # Mapeia (node_id, obstacle_id) → True se já gerou tangentes
-        self._tangent_cache: dict[tuple[int, int], bool] = {}
+        # Cache baseado em posição aproximada (grade de resolução 0.05) + id do obstáculo.
+        # Evita re-gerar tangentes degenerados quando nós distintos ficam
+        # na mesma vizinhança de um obstáculo.
+        self._tangent_cache: set[tuple[int, int, int]] = set()
+        self._cache_resolution: float = 0.05
 
     # ------------------------------------------------------------------
     # Ponto de entrada principal
@@ -744,45 +754,43 @@ class PathPlanner:
         """
         Implementa a sub-rotina 'Gera novos pontos' do fluxograma:
 
-        - O obstáculo já gerou tangentes para esta origem? → descarta.
-        - Caso contrário, gera tangentes e filtra as que colidem com
-          o segmento para o nó anterior.
+        - O obstáculo já gerou tangentes para esta posição de origem? → descarta.
+        - Caso contrário, gera tangentes e filtra as que colidem com algum obstáculo.
+
+        O cache usa posição quantizada (grade de 0.05 unidades) + id do obstáculo,
+        evitando re-geração degenerada quando nós distintos ficam muito próximos
+        da borda efetiva de um mesmo obstáculo.
         """
-        cache_key = (id(node), id(obstacle))
+        res = self._cache_resolution
+        qx = int(round(origin.x / res))
+        qy = int(round(origin.y / res))
+        cache_key = (qx, qy, id(obstacle))
 
-        # O obstáculo já gerou tangentes para este nó de origem?
-        if self._tangent_cache.get(cache_key, False):
-            return []  # Descarta o ponto gerado
+        if cache_key in self._tangent_cache:
+            return []  # já processado nesta vizinhança — descarta
 
-        # Marca como visitado
-        self._tangent_cache[cache_key] = True
+        self._tangent_cache.add(cache_key)
 
         # Gera pontos tangentes ao obstáculo atingido
         tangent_points = obstacle.get_tangent_points(origin)
 
         # Filtra pontos inválidos:
         # 1. O ponto tangente não deve estar dentro do próprio obstáculo que o gerou
-        #    (pode ocorrer se a margem for insuficiente para certos ângulos)
-        # 2. O segmento origem→tangente não deve colidir com nenhum obstáculo,
-        #    incluindo o gerador. Para Circle, is_intercepted_by retorna False para
-        #    seus próprios tangentes (o segmento apenas toca a borda sem atravessar).
-        #    Para Stadium, o cap gera o tangente mas o corpo pode ser atravessado —
-        #    verificar contra o próprio obstáculo captura corretamente esse caso.
+        # 2. O segmento origem→tangente não deve colidir com nenhum obstáculo.
+        #    Para Circle, is_intercepted_by retorna False para seus próprios tangentes.
+        #    Para Stadium, verifica corretamente a travessia do corpo.
 
         valid_points: list[Point] = []
         for pt in tangent_points:
-            # Verifica se o ponto está dentro do obstáculo que o gerou
             if obstacle.do_contain_the_point(pt):
-                continue  # margem insuficiente — descarta
+                continue  # ainda dentro — descarta
 
-            # Verifica colisão do segmento origem→tangente com TODOS os obstáculos
             if self.world.obstacle_hit(origin, pt) is not None:
                 continue  # algum obstáculo bloqueia o trecho — descarta
 
             valid_points.append(pt)
 
         return valid_points
-
 
 # ---------------------------------------------------------------------------
 # Exemplo de uso / demonstração
@@ -897,6 +905,13 @@ def generate_random_world(
 
     return point_a, point_b, obstacles
 
+
+def no_collision(x0, controls, world):
+    x1 = integrate_control_2d(x0, controls)
+    A = Point(x0[0], x0[1])
+    B = Point(x1[0], x1[1])
+    return world.is_free_path(A, B)
+
 if __name__ == "__main__":
     # Cria um mundo com alguns obstáculos
     vmax = 3
@@ -913,9 +928,9 @@ if __name__ == "__main__":
 
     point_a, point_b, obstacles = generate_random_world(
         boundaries,
-        n_circles=8,
-        n_quads=2,
-        n_stadiums=2
+        n_circles=16,
+        n_quads=0,
+        n_stadiums=0
     )
 
     print(point_a, point_b)
@@ -924,10 +939,10 @@ if __name__ == "__main__":
     import plot
     from bboptimizer import bb_optimizer
     world = World(obstacles=obstacles, boundaries=boundaries)
-    plot.plot_world_and_path(world, [])
+    plot.plot_world_and_path(world, [point_a, point_b])
 
     time_start = perf_counter()
-    planner = PathPlanner(world=world, max_iterations=500)
+    planner = PathPlanner(world=world, max_iterations=5000)
     path = planner.plan(point_a, point_b)
 
 
@@ -944,16 +959,13 @@ if __name__ == "__main__":
     acc_path = []
     state = list([point_a.x, point_a.y, vi[0], vi[1]])
     for i in range(len(path) - 1):
+        print(i)
         xg = [path[i + 1].x, path[i + 1].y, 0, 0]
         seg = time_optimal_steer_2d_vlim(state, xg, umin=umin, umax=umax, vmax=vmax)
         acc_path.extend(seg)
         state = list(integrate_control_2d(state, seg))
 
-    def no_collision(x0, controls, world):
-        x1 = integrate_control_2d(x0, controls)
-        A = Point(x0[0], x0[1])
-        B = Point(x1[0], x1[1])
-        return world.is_free_path(A, B)
+
 
 
 
@@ -983,6 +995,14 @@ if __name__ == "__main__":
         pos_path.append(Point(state[0], state[1]))
     pos_path[0] = Point(pos_path[0][0], pos_path[0][1])
 
+    acc_pos_path = [[path[0].x, path[0].y, vi[0], vi[1]]]
+    state = [path[0].x, path[0].y, vi[0], vi[1]]
+    for seg in acc_path:
+        state = list(integrate_control_2d(state, [seg]))
+        acc_pos_path.append(Point(state[0], state[1]))
+    acc_pos_path[0] = Point(acc_pos_path[0][0], acc_pos_path[0][1])
+
+
     time_end = perf_counter()
 
     print("tempo:", time_end - time_start)
@@ -990,6 +1010,7 @@ if __name__ == "__main__":
     print(pos_and_acc)
 
     plot.plot_world_and_path(world, path)
+    plot.plot_world_and_path(world, acc_pos_path)
     plot.plot_world_and_path(world, pos_path)
 
     xinit = [point_a.x, point_a.y, vi[0], vi[1]]
