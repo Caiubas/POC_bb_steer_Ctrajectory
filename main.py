@@ -178,7 +178,7 @@ class Circle(Obstacle):
         dist_sq = (closest_x - self.center.x) ** 2 + \
                   (closest_y - self.center.y) ** 2
 
-        return dist_sq <= self.radius * self.radius
+        return dist_sq < self.radius * self.radius
 
     def get_tangent_points(self, origin: Point,
                            margin: float = 0.1) -> list[Point]:
@@ -620,15 +620,14 @@ class PathPlanner:
          - Não → armazena como alternativa.
     """
 
-    def __init__(self, world: World, max_iterations: int = 500) -> None:
+    def __init__(self, world, max_iterations=500):
         self.world = world
         self.max_iterations = max_iterations
-        # Cache baseado em posição aproximada (grade de resolução 0.05) + id do obstáculo.
-        # Evita re-gerar tangentes degenerados quando nós distintos ficam
-        # na mesma vizinhança de um obstáculo.
         self._tangent_cache: set[tuple[int, int, int]] = set()
-        self._cache_resolution: float = 0.05
-
+        self._cache_resolution: float = 0.5  # era 0.05 — muito fino
+        self._obstacle_index: dict[int, int] = {
+            id(obs): i for i, obs in enumerate(world.obstacles)
+        }
     # ------------------------------------------------------------------
     # Ponto de entrada principal
     # ------------------------------------------------------------------
@@ -638,6 +637,7 @@ class PathPlanner:
         Executa o algoritmo de planejamento e retorna a lista de pontos
         que formam o caminho de A até B.
         """
+        self._tangent_cache.clear()
         trajectory_prefix: list[Point] = []
 
         # --- Passo 1a: A está dentro de um obstáculo? ---
@@ -725,7 +725,12 @@ class PathPlanner:
 
             child_node = current_node.generate_child(best)
             tree.nodes.append(child_node)
-            stack.append(child_node)
+            if self.world.obstacle_hit(best, point_b) is not None:
+                stack.append(child_node)
+            else:
+                # Caminho filho→B está livre, encerrar
+                path = tree.build_path(child_node) + [point_b]
+                return trajectory_prefix + path
 
         # Sem caminho encontrado
         return []
@@ -748,47 +753,31 @@ class PathPlanner:
             return min(candidates, key=lambda p: p.distance_to(point))
         return point
 
-    def _generate_new_points(self, node: Node,
-                             obstacle: Obstacle,
-                             origin: Point) -> list[Point]:
-        """
-        Implementa a sub-rotina 'Gera novos pontos' do fluxograma:
-
-        - O obstáculo já gerou tangentes para esta posição de origem? → descarta.
-        - Caso contrário, gera tangentes e filtra as que colidem com algum obstáculo.
-
-        O cache usa posição quantizada (grade de 0.05 unidades) + id do obstáculo,
-        evitando re-geração degenerada quando nós distintos ficam muito próximos
-        da borda efetiva de um mesmo obstáculo.
-        """
+    def _generate_new_points(self, node, obstacle, origin):
         res = self._cache_resolution
         qx = int(round(origin.x / res))
         qy = int(round(origin.y / res))
-        cache_key = (qx, qy, id(obstacle))
+        cache_key = (qx, qy, self._obstacle_index.get(id(obstacle), -1))
 
         if cache_key in self._tangent_cache:
-            return []  # já processado nesta vizinhança — descarta
-
+            return []
         self._tangent_cache.add(cache_key)
 
-        # Gera pontos tangentes ao obstáculo atingido
         tangent_points = obstacle.get_tangent_points(origin)
 
-        # Filtra pontos inválidos:
-        # 1. O ponto tangente não deve estar dentro do próprio obstáculo que o gerou
-        # 2. O segmento origem→tangente não deve colidir com nenhum obstáculo.
-        #    Para Circle, is_intercepted_by retorna False para seus próprios tangentes.
-        #    Para Stadium, verifica corretamente a travessia do corpo.
-
-        valid_points: list[Point] = []
+        valid_points = []
         for pt in tangent_points:
             if obstacle.do_contain_the_point(pt):
-                continue  # ainda dentro — descarta
+                continue
 
-            if self.world.obstacle_hit(origin, pt) is not None:
-                continue  # algum obstáculo bloqueia o trecho — descarta
-
-            valid_points.append(pt)
+            # ✅ CORREÇÃO: ignora o obstáculo que gerou o tangente
+            for obs in self.world.obstacles:
+                if obs is obstacle:
+                    continue
+                if obs.is_intercepted_by(origin, pt):
+                    break
+            else:
+                valid_points.append(pt)
 
         return valid_points
 
@@ -933,8 +922,6 @@ if __name__ == "__main__":
         n_stadiums=0
     )
 
-    print(point_a, point_b)
-    print(len(obstacles))
 
     import plot
     from bboptimizer import bb_optimizer

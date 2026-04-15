@@ -1,10 +1,11 @@
-from dataclasses import dataclass
 from __future__ import annotations
+import copy
+from dataclasses import dataclass
+
 
 import numpy as np
 
-from bboptimizer import split_controls
-from main import Vector
+from main import Vector, World
 
 from math import fabs, sqrt
 
@@ -25,7 +26,6 @@ class SplitResult:
     x_t1: State2D
     x_t2: State2D
 
-@dataclass
 class State2D:
     x: PhaseState  # (q=0, v=0)
     y: PhaseState  # (q=0, v=0)
@@ -41,17 +41,25 @@ class State2D:
     def to_list(self) -> list:
         return [self.x.q, self.y.q, self.x.v, self.y.v]
 
-    def integrate(self, control: ControlSegment2D) -> State2D:
+    """def integrate(self, control: ControlSegment2D) -> State2D:
         xo = self.x.q + self.x.v * control.duration + 0.5 * control.accel.x * control.duration ** 2
         xdoto = self.x.v + control.accel.x * control.duration
         yo = self.y.q + self.y.v * control.duration + 0.5 * control.accel.y * control.duration ** 2
         ydoto = self.y.v + control.accel.y * control.duration
-        return State2D(PhaseState(xo, xdoto), PhaseState(yo, ydoto))
+        return State2D(PhaseState(xo, xdoto), PhaseState(yo, ydoto))"""
 
 class ControlSegment2D:
     def __init__(self, accel: Vector, duration: float):
         self.accel = accel
         self.duration = duration
+
+    def integrate(self, x0: State2D) -> State2D:
+        xo = x0.x.q + x0.x.v * self.duration + 0.5 * self.accel.x * self.duration ** 2
+        xdoto = x0.x.v + self.accel.x * self.duration
+        yo = x0.y.q + x0.y.v * self.duration + 0.5 * self.accel.y * self.duration ** 2
+        ydoto = x0.y.v + self.accel.y * self.duration
+        return State2D(PhaseState(xo, xdoto), PhaseState(yo, ydoto))
+
 
 class ControlSegment1D:
     def __init__(self, accel: float, duration: float):
@@ -72,6 +80,12 @@ class ControlSequence1D:
     def __init__(self, segments: list[ControlSegment1D]):
         self.segments = segments
 
+    def total_time(self) -> float:
+        t = 0.0
+        for c in self.segments:
+            t += c.duration
+        return t
+
 class ControlSequence2D:
     def __init__(self, segments: list[ControlSegment2D]):
         self.segments = segments
@@ -82,11 +96,19 @@ class ControlSequence2D:
             t += c.duration
         return t
 
-    def integrate(self, x0: State2D) -> PhaseState:
+    def integrate(self, x0: State2D) -> State2D:
         x1 = x0
         for c in self.segments:
-            x1 = x1.integrate(c)
+            x1 = c.integrate(x1)
         return x1
+
+    def integrate_list(self, x0: State2D) -> list[State2D]:
+        state = copy.deepcopy(x0)
+        path = [state]
+        for c in self.segments:
+            state = c.integrate(state)
+            path.append(state)
+        return path
 
     def split(self, x0: State2D, t1, t2) -> SplitResult:
 
@@ -99,18 +121,18 @@ class ControlSequence2D:
                 u, dt = seg.accel, seg.duration
                 if t + dt <= t_split + 1e-9:
                     before.append(seg)
-                    s = s.integrate(seg)
+                    s = seg.integrate(s)
                     t += dt
                 else:
                     dt1 = t_split - t
                     dt2 = dt - dt1
                     if dt1 > 1e-9:
                         before.append(ControlSegment2D(seg.accel, dt1))
-                        s = s.integrate(ControlSegment2D(seg.accel, dt1))
+                        s = ControlSegment2D(seg.accel, dt1).integrate(s)
                     if dt2 > 1e-9:
                         after.append(ControlSegment2D(seg.accel, dt2))
                     # usa idx em vez de segs.index(seg) para evitar erros com duplicados
-                    after += segs[idx + 1:]
+                    after += segs.segments[idx + 1:]
                     return ControlSequence2D(before), ControlSequence2D(after), s
             return ControlSequence2D(before), ControlSequence2D(after), s
 
@@ -137,18 +159,9 @@ class ControlSequence2D:
     def collision_free(self, x0: State2D, fn, world):
         state = x0
         for seg in self.segments:
-            new_state = State2D(
-                PhaseState(state.x.q + state.x.v * seg.duration + 0.5 * seg.accel.x * seg.duration ** 2,
-                state.x.v + seg.accel.x * seg.duration),
-                PhaseState(state.y.q + state.y.v * seg.duration + 0.5 * seg.accel.y * seg.duration ** 2,
-                state.y.v + seg.accel.y * seg.duration)
-            )
-            if not fn(new_state, [seg], world):
+            if not fn(state, seg, world):
                 return False
-            state = new_state
-
-        if not fn(x0, self.segments, world):
-            return False
+            state = seg.integrate(state)
         return True
 
     def __iter__(self):
@@ -241,7 +254,7 @@ class ScalarBangBang:
             u_acc = self.limits.acceleration_max.x
             u_dec = self.limits.acceleration_min.x
         else:
-            v_cruise = self.limits.get_per_axis_vlim()
+            v_cruise = -self.limits.get_per_axis_vlim()
             u_acc = self.limits.acceleration_min.x
             u_dec = self.limits.acceleration_max.x
 
@@ -295,9 +308,326 @@ class ScalarBangBang:
 
         return ControlSequence1D(result) if result else c
 
+    def scaled_bb_no_vlim(self,x0: PhaseState, x1: PhaseState, tf: float) -> ControlSequence1D:
+        co = self.optimal_no_vlim(x0, x1)
+        tfo = co.total_time()
+
+        if tfo > tf:
+            print("Error: Requested final time is less than time optimal")
+            return ControlSequence1D([])
+
+        # Recently added divide by zero tests. Maybe it's beter to just test whether co is a singleton
+        u1 = self.limits.acceleration_max.x
+        num = x1.q - x0.q - (x0.v + x1.v) * tf * 0.5
+        den = (x0.v - x1.v) * 0.5 + tf * u1 * 0.5
+
+        if fabs(den) < self.float_epsilon:
+            return ControlSequence1D([])
+        t1 = num / den
+
+        if t1 < 0:
+            u1 = self.limits.acceleration_min.x
+            den = (x0.v - x1.v) * 0.5 + tf * u1 * 0.5
+            if fabs(den) < self.float_epsilon:
+                return ControlSequence1D([])
+            t1 = num / den
+
+        tden = (tf - t1)
+        if fabs(tden) < self.float_epsilon:
+            return []
+        u2 = ((x1.v - x0.v) - u1 * t1) / tden
+
+        if u2 > self.limits.acceleration_max.x + self.time_epsilon or u2 < self.limits.acceleration_min.x - self.time_epsilon:
+            # print("Failure: Not stretchable from time",tfo,"to",tf,"  u2",u2)
+            return ControlSequence1D([])
+
+        return ControlSequence1D([ControlSegment1D(u1, t1), ControlSegment1D(u2, tf - t1)])
+
 
     def scaled_bb(self,x0: PhaseState, x1: PhaseState, tf: float) -> ControlSequence1D:
+        # Tenta sempre a quadrática primeiro — é o caso geral
+        # u_acc/u_dec dependem da direcção do movimento
+        for u_acc, u_dec in [(self.limits.acceleration_max.x, self.limits.acceleration_min.x), (self.limits.acceleration_min.x, self.limits.acceleration_max.x)]:
+            if fabs(u_acc) < self.float_epsilon or fabs(u_dec) < self.float_epsilon:
+                continue
+
+            a = 1.0 / u_acc
+            b = 1.0 / u_dec
+
+            A_coef = 0.5 * (b - a)
+            B_coef = tf + x0.v * a - x1.v * b
+            C_coef = x0.q - 0.5 * x0.v ** 2 * a + 0.5 * x1.v ** 2 * b - x1.q
+
+            if fabs(A_coef) < self.float_epsilon:
+                if fabs(B_coef) < self.float_epsilon:
+                    continue
+                vc_candidates = [-C_coef / B_coef]
+            else:
+                disc = B_coef ** 2 - 4 * A_coef * C_coef
+                if disc < 0:
+                    continue
+                sq = sqrt(disc)
+                vc_candidates = [(-B_coef + sq) / (2 * A_coef),
+                                 (-B_coef - sq) / (2 * A_coef)]
+
+            for vc in vc_candidates:
+                if vc < -self.limits.get_per_axis_vlim() - self.time_epsilon or vc > self.limits.get_per_axis_vlim() + self.time_epsilon:
+                    continue
+                t_acc_v = (vc - x0.v) * a
+                t_dec_v = (x1.v - vc) * b
+                t_cr_v = tf - t_acc_v - t_dec_v
+                if t_acc_v < -self.time_epsilon or t_dec_v < -self.time_epsilon or t_cr_v < -self.time_epsilon:
+                    continue
+                t_acc_v = max(0.0, t_acc_v)
+                t_dec_v = max(0.0, t_dec_v)
+                t_cr_v = max(0.0, t_cr_v)
+                segs = []
+                if t_acc_v > self.time_epsilon:
+                    segs.append(ControlSegment1D(u_acc, t_acc_v))
+                if t_cr_v > self.time_epsilon:
+                    segs.append(ControlSegment1D(0.0, t_cr_v))
+                if t_dec_v > self.time_epsilon:
+                    segs.append(ControlSegment1D(u_dec, t_dec_v))
+                if segs:
+                    return ControlSequence1D(segs)
+
+        return self.scaled_bb_no_vlim(x0, x1, tf)
+
+    def hard_stop_bb(self,x0: PhaseState, x1: PhaseState) -> ControlSequence1D:
+        # Hard stopping time
+        if x0.v > 0:
+            ux = self.limits.acceleration_min.x
+            s = -x0.v / ux
+            sx = x0.q + x0.v * s + 0.5 * ux * s * s
+        else:
+            ux = self.limits.acceleration_max.x
+            s = -x0.v / ux
+            sx = x0.q + x0.v * s + 0.5 * ux * s * s
+        d = self.optimal_no_vlim(PhaseState(sx, 0.0), x1)
+
+        c = []
+
+        # Make the hard stop (if needed)
+        if s > 0.0:
+            c.append(ControlSegment1D(ux, s))
+
+        c += d.segments
+        return ControlSequence1D(c)
+
+    def hard_stop_wait_bb(self,x0: PhaseState, x1: PhaseState, tf) -> ControlSequence1D:
+        c = self.hard_stop_bb(x0, x1)
+        tt = c.total_time()
+
+        if tt > tf:
+            # print("No enough time for hard stop")
+            return ControlSequence1D([])
+
+        # Make a wait (if needed)
+        if tf > tt:
+            if x0.v == 0.0:
+                c.segments.insert(0, ControlSegment1D(0.0, tf - tt))
+            else:
+                c.segments.insert(1, ControlSegment1D(0.0, tf - tt))
+
+        return c
+
+class Steer2D:
+
+    def __init__(self, limits: AccelLimits):
+        self.limits = limits
+        self.x_axis = ScalarBangBang(limits)
+        self.y_axis = ScalarBangBang(limits)
+        self.time_epsilon = 0.0000001
+        self.float_epsilon = 1.0E-200
+
+    def merge_axes(self, c1: ControlSequence1D, c2: ControlSequence1D) -> ControlSequence2D:
+        """Combina dois ControlSequence de eixos diferentes com durações potencialmente distintas."""
+        segments = []
+        t = 0.0
+        tt = c1.total_time()  # devem ter o mesmo tempo total
+
+        i, j = 0, 0
+        t1_acc, t2_acc = 0.0, 0.0
+
+        ts1 = []
+        t = 0.0
+        for seg in c1.segments:
+            t += seg.duration
+            ts1.append(t)
+
+        ts2 = []
+        t = 0.0
+        for seg in c2.segments:
+            t += seg.duration
+            ts2.append(t)
+
+        t = 0.0
+        while i < len(c1.segments) and j < len(c2.segments):
+            next1 = ts1[i]
+            next2 = ts2[j]
+            dt = min(next1, next2) - t
+            seg = ControlSegment2D(
+                accel=Vector(c1.segments[i].accel, c2.segments[j].accel),
+                duration=dt
+            )
+            segments.append(seg)
+            t += dt
+            if abs(t - next1) < 1e-9:
+                i += 1
+            if abs(t - next2) < 1e-9:
+                j += 1
+
+        return ControlSequence2D(segments)
+
+    def steer_no_vlim(self, x0: PhaseState, x1: PhaseState) -> ControlSequence2D:
         pass
 
-    def hard_stop_bb(self,x0: PhaseState, x1: PhaseState, tf: float) -> ControlSequence1D:
-        pass
+    def steer(self, x0: State2D, x1: State2D) -> ControlSequence2D:
+        c1 = self.x_axis.optimal(x0.x, x1.x)
+        c2 = self.y_axis.optimal(x0.y, x1.y)
+
+        t1 = c1.total_time()
+        t2 = c2.total_time()
+
+        # O resto é igual ao time_optimal_steer_2d original
+        if fabs(t1 - t2) > self.time_epsilon:
+            if t1 < t2:
+                c1 = self.x_axis.scaled_bb(x0.x, x1.x, t2)
+                if c1.segments == []:
+                    c1 = self.x_axis.hard_stop_bb(x0.x, x1.x)#bang_bang_hard_stop(xinit[0], xinit[2], xgoal[0], xgoal[2], umin[0], umax[0])
+                    tt1 = c1.total_time()
+                    if tt1 > t2:
+                        c2 = self.y_axis.scaled_bb(x0.y, x1.y, tt1)#bang_bang_scaled_vlim(xinit[1], xinit[3], xgoal[1], xgoal[3], tt1, umin[1], umax[1],
+                              #                     vmax=vmax_per_axis, vmin=vmin_per_axis)
+                        if c2.segments == []:
+                            c2 = self.y_axis.hard_stop_bb(x0.y, x1.y)#bang_bang_hard_stop(xinit[1], xinit[3], xgoal[1], xgoal[3], umin[1], umax[1])
+                            tt2 = c2.total_time()
+                            if tt2 < tt1:
+                                c2 = self.y_axis.hard_stop_wait_bb(x0.y, x1.y, tt1)#bang_bang_hard_stop_wait(xinit[1], xinit[3], xgoal[1], xgoal[3], tt1, umin[1],
+                                     #                         umax[1])
+                            else:
+                                c1 = self.x_axis.hard_stop_wait_bb(x0.x, x1.x, tt2)#bang_bang_hard_stop_wait(xinit[0], xinit[2], xgoal[0], xgoal[2], tt2, umin[0],
+                                     #                         umax[0])
+                    else:
+                        c1 = self.x_axis.hard_stop_wait_bb(x0.x, x1.x, t2)#bang_bang_hard_stop_wait(xinit[0], xinit[2], xgoal[0], xgoal[2], t2, umin[0], umax[0])
+            else:
+                c2 = self.y_axis.scaled_bb(x0.y, x1.y, t1)#bang_bang_scaled_vlim(xinit[1], xinit[3], xgoal[1], xgoal[3], t1, umin[1], umax[1],
+                     #                      vmax=vmax_per_axis, vmin=vmin_per_axis)
+                if c2.segments == []:
+                    c2 = self.y_axis.hard_stop_bb(x0.y, x1.y)#bang_bang_hard_stop(xinit[1], xinit[3], xgoal[1], xgoal[3], umin[1], umax[1])
+                    tt2 = c2.total_time()
+                    if tt2 > t1:
+                        c1 = self.x_axis.scaled_bb(x0.x, x1.x, tt2)#bang_bang_scaled_vlim(xinit[0], xinit[2], xgoal[0], xgoal[2], tt2, umin[0], umax[0],
+                             #                      vmax=vmax_per_axis, vmin=vmin_per_axis)
+                        if c1.segments == []:
+                            c1 = self.x_axis.hard_stop_bb(x0.x, x1.x)#bang_bang_hard_stop(xinit[0], xinit[2], xgoal[0], xgoal[2], umin[0], umax[0])
+                            tt1 = c1.total_time()
+                            if tt1 < tt2:
+                                c1 = self.x_axis.hard_stop_wait_bb(x0.x, x1.x, tt2)#bang_bang_hard_stop_wait(xinit[0], xinit[2], xgoal[0], xgoal[2], tt2, umin[0],
+                                     #                         umax[0])
+                            else:
+                                c2 = self.y_axis.hard_stop_wait_bb(x0.y, x1.y, tt1)#bang_bang_hard_stop_wait(xinit[1], xinit[3], xgoal[1], xgoal[3], tt1, umin[1],
+                                     #                         umax[1])
+                    else:
+                        c2 = self.y_axis.hard_stop_wait_bb(x0.y, x1.y, t1)#bang_bang_hard_stop_wait(xinit[1], xinit[3], xgoal[1], xgoal[3], t1, umin[1], umax[1])
+
+        if not c1 or not c2:
+            return ControlSequence2D([])
+
+        c = self.merge_axes(c1, c2)
+        return c
+
+    def steer_list(self, path: list, v0: Vector) -> ControlSequence2D:
+        if len(path) == 0:
+            raise RuntimeError('Path is empty')
+        seq = self.steer(State2D(PhaseState(path[0].x, v0.x), PhaseState(path[0].y, v0.y)),
+                   State2D(PhaseState(path[1].x, 0), PhaseState(path[1].y, 0)))
+        for i in range(1, len(path) - 1):
+            seq = seq.merge(self.steer(State2D(PhaseState(path[i].x, 0), PhaseState(path[i].y, 0)), State2D(PhaseState(path[i + 1].x, 0), PhaseState(path[i + 1].y, 0))))
+
+        return seq
+
+class BangBangOptimizer:
+    def __init__(self, steer: Steer2D, collision_fn, world: World, max_iter = 500, patience = 50, min_improvement = 0.1, time_epsilon = 1e-6, float_epsilon = 1e-6):
+        self.collision_fn = collision_fn
+        self.world = world
+        self.max_iter = max_iter
+        self.patience = patience
+        self.min_improvement = min_improvement
+        self.time_epsilon = time_epsilon
+        self.float_epsilon = float_epsilon
+        self.steer = steer
+
+    def _halton(self, index, base):
+        """Gera o i-ésimo elemento da sequência de Halton numa dada base."""
+        result = 0.0
+        f = 1.0
+        i = index
+        while i > 0:
+            f /= base
+            result += f * (i % base)
+            i //= base
+        return result
+
+    def optimize(self, x0: State2D, controls: ControlSequence2D) -> ControlSequence2D:
+        best = copy.deepcopy(controls)
+        no_improve = 0
+        halton_index = 1
+
+        for iteration in range(self.max_iter):
+            tf = best.total_time()
+            if tf < 1e-9:
+                break
+
+            h1 = self._halton(halton_index, 2)
+            h2 = self._halton(halton_index, 3)
+            halton_index += 1
+
+            t1 = h1 * tf
+            t2 = h2 * tf
+
+            if t1 > t2:
+                if h1 < 0.5:
+                    t1 = 0.0
+                else:
+                    t2 = tf
+
+            if t1 >= t2 - self.time_epsilon:
+                continue
+
+            split_result = best.split(x0, t1, t2)
+            seg_before = split_result.before
+            seg_after = split_result.after
+            seg_mid = split_result.mid
+            x_t1, x_t2 = split_result.x_t1, split_result.x_t2
+
+            if seg_mid is None:
+                continue
+
+            # usa os umin/umax correctos e os estados exactos do segmento
+            new_mid = self.steer.steer(x_t1, x_t2)
+
+            new_mid_time = new_mid.total_time()
+            old_mid_time = seg_mid.total_time()
+
+            if new_mid_time >= old_mid_time - self.time_epsilon:
+                continue
+
+            candidate = seg_before.merge(new_mid.merge(seg_after))
+
+            if not new_mid.collision_free(x_t1, self.collision_fn, world=self.world): #colisao ponto a ponto
+                continue
+
+            improvement = old_mid_time - new_mid_time
+            best = candidate
+            if improvement > self.min_improvement:
+                no_improve = 0
+            else:
+                no_improve += 1
+
+            if no_improve >= self.patience:
+                break
+
+        return best
+
+

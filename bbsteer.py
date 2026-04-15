@@ -303,7 +303,6 @@ def bang_bang_scaled_vlim(ix, iv, gx, gv, tf, umin=-1.0, umax=1.0, vmin=-1.0, vm
             if segs:
                 return segs
 
-    # Fallback: sem limite de velocidade (vc pode exceder vmax, mas é o melhor possível)
     return bang_bang_scaled(ix, iv, gx, gv, tf, umin, umax)
 
 

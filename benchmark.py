@@ -1,6 +1,8 @@
 from time import perf_counter
 import statistics as stats
 
+import numpy as np
+
 import plot
 from bboptimizer import bb_optimizer
 from bbsteer import integrate_control_2d, time_optimal_steer_2d_vlim
@@ -64,18 +66,18 @@ def benchmark_pipeline(N):
 
     boundaries = Quadrilateral(vertices=[
         Point(0.0, 0.0),
-        Point(12.0, 0.0),
-        Point(12.0, 10.0),
-        Point(0.0, 10.0),
+        Point(24.0, 0.0),
+        Point(24.0, 20.0),
+        Point(0.0, 20.0),
     ])
 
     worlds = []
     for _ in range(N):
         point_a, point_b, obstacles = generate_random_world(
             boundaries,
-            n_circles=16,
-            n_quads=0,
-            n_stadiums=0
+            n_circles=32,
+            n_quads=10,
+            n_stadiums=3
         )
         world = World(obstacles=obstacles, boundaries=boundaries)
         worlds.append((point_a, point_b, world))
@@ -218,6 +220,48 @@ def plot_paths_comparison(results, max_plots=None):
                 ys = [p.y for p in verts] + [verts[0].y]
                 ax.plot(xs, ys)
 
+                # --- Stadium ---
+            elif obs.__class__.__name__ == "Stadium":
+                p1, p2 = obs.vertices
+                r = obs.radius
+
+                # vetor direção
+                dx = p2.x - p1.x
+                dy = p2.y - p1.y
+                length = np.hypot(dx, dy)
+
+                if length == 0:
+                    continue
+
+                ux, uy = dx / length, dy / length
+                # vetor perpendicular
+                px, py = -uy, ux
+
+                # retângulo central
+                corners = [
+                    (p1.x + px * r, p1.y + py * r),
+                    (p2.x + px * r, p2.y + py * r),
+                    (p2.x - px * r, p2.y - py * r),
+                    (p1.x - px * r, p1.y - py * r),
+                    (p1.x + px * r, p1.y + py * r),
+                ]
+                xs, ys = zip(*corners)
+                ax.plot(xs, ys)
+
+                # semicirculos
+                theta = np.linspace(0, np.pi, 50)
+
+                # lado p1
+                angle = np.arctan2(uy, ux)
+                x1 = p1.x + r * np.cos(theta + angle + np.pi / 2)
+                y1 = p1.y + r * np.sin(theta + angle + np.pi / 2)
+                ax.plot(x1, y1)
+
+                # lado p2
+                x2 = p2.x + r * np.cos(theta + angle - np.pi / 2)
+                y2 = p2.y + r * np.sin(theta + angle - np.pi / 2)
+                ax.plot(x2, y2)
+
         # ---------------------------
         # PATH ORIGINAL (planner)
         # ---------------------------
@@ -249,7 +293,9 @@ def plot_paths_comparison(results, max_plots=None):
     print(f"\nPlots gerados: {plotted}")
 
 if __name__ == "__main__":
-    times, results = benchmark_pipeline(100)
+    times, results = benchmark_pipeline(1000)
+    print(len(times["planner"]))
+    print(np.mean(times["planner"]))
     print(times)
     plot_benchmark_results(times)
     plot_paths_comparison(results)
