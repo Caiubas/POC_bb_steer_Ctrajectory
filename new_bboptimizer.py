@@ -9,6 +9,7 @@ from main import Vector, World
 
 from math import fabs, sqrt
 
+
 class AccelLimits:
     def __init__(self, acceleration_min: Vector, acceleration_max: Vector, vmax: float):
         self.acceleration_min = acceleration_min

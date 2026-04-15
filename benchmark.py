@@ -10,6 +10,10 @@ from main import no_collision, World, generate_random_world, Point, Quadrilatera
 
 import matplotlib.pyplot as plt
 
+from new_bboptimizer import *
+from pipeline import new_no_collision
+
+
 def plot_benchmark_results(times):
     """
     times: dict retornado pelo benchmark_pipeline
@@ -60,9 +64,9 @@ def plot_benchmark_results(times):
 
 def benchmark_pipeline(N):
     vmax = 3
-    umax = [0.1, 0.1]
-    umin = [-0.1, -0.1]
-    vi = [0, 0]
+    umax = Vector(0.1, 0.1)
+    umin = Vector(-0.1, -0.1)
+    vi = Vector(0, 0)
 
     boundaries = Quadrilateral(vertices=[
         Point(0.0, 0.0),
@@ -114,17 +118,14 @@ def benchmark_pipeline(N):
         # STEER
         # -------------------------------
         t0 = perf_counter()
-        acc_path = []
-        state = [point_a.x, point_a.y, vi[0], vi[1]]
+        x0 = State2D(PhaseState(path[0].x, vi.x), PhaseState(path[0].y, vi.y))
+        limits = AccelLimits(umin, umax, vmax=vmax)
+        steer = Steer2D(limits)
+        seq = steer.steer_list(path, vi)  # ControlSequence
 
-        for j in range(len(path) - 1):
-            xg = [path[j + 1].x, path[j + 1].y, 0, 0]
-            seg = time_optimal_steer_2d_vlim(
-                state, xg,
-                umin=umin, umax=umax, vmax=vmax
-            )
-            acc_path.extend(seg)
-            state = list(integrate_control_2d(state, seg))
+        steer_path = seq.integrate_list(x0)
+
+
         t1 = perf_counter()
 
         times["steer"].append(t1 - t0)
@@ -133,17 +134,8 @@ def benchmark_pipeline(N):
         # OTIMIZAÇÃO
         # -------------------------------
         t0 = perf_counter()
-        optimized = bb_optimizer(
-            xinit=[path[0].x, path[0].y, vi[0], vi[1]],
-            controls=acc_path,
-            world=world,
-            vmax=vmax,
-            collision_check_fn=no_collision,
-            max_iter=500,
-            patience=50,
-            umax=umax,
-            umin=umin
-        )
+        opt = BangBangOptimizer(steer, new_no_collision, world)
+        result = opt.optimize(x0, seq)  # ControlSequence
         t1 = perf_counter()
 
         times["optimizer"].append(t1 - t0)
@@ -152,12 +144,7 @@ def benchmark_pipeline(N):
         # INTEGRAÇÃO DO OTIMIZADO
         # -------------------------------
         t0 = perf_counter()
-        state = [path[0].x, path[0].y, vi[0], vi[1]]
-        optimized_path = [Point(state[0], state[1])]
-
-        for seg in optimized:
-            state = list(integrate_control_2d(state, [seg]))
-            optimized_path.append(Point(state[0], state[1]))
+        optimized_path = result.integrate_list(x0)
         t1 = perf_counter()
 
         times["integration"].append(t1 - t0)
@@ -171,7 +158,7 @@ def benchmark_pipeline(N):
         results.append({
             "world": world,
             "path": path,
-            "optimized_path": optimized_path
+            "optimized_path": [Point(p.x.q, p.y.q) for p in optimized_path],
         })
 
     return times, results

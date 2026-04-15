@@ -1,6 +1,7 @@
 from main import *
 from new_bboptimizer import AccelLimits, Steer2D, BangBangOptimizer, State2D, PhaseState, ControlSegment2D
 import plot
+from rrt import RRT
 
 def new_no_collision(x0: State2D, controls: ControlSegment2D, world):
     x1 = controls.integrate(x0)
@@ -69,28 +70,11 @@ if __name__ == "__main__":
 
     point_a, point_b, obstacles = generate_random_world(
         boundaries,
-        n_circles=16,
-        n_quads=0,
-        n_stadiums=0
+        n_circles=32,
+        n_quads=4,
+        n_stadiums=2
     )
-    obstacles = [Circle(center=Point(4.780, 7.087), radius=0.7122819151457056),
-                 Circle(center=Point(0.924, 3.453), radius=0.4309845260556222),
-                 Circle(center=Point(0.817, 4.210), radius=0.3956059387153557),
-                 Circle(center=Point(4.550, 1.723), radius=0.6367514853961431),
-                 Circle(center=Point(1.639, 5.912), radius=0.6670616384769612),
-                 Circle(center=Point(5.741, 0.898), radius=0.735139790355845),
-                 Circle(center=Point(2.320, 6.653), radius=0.7746661803729162),
-                 Circle(center=Point(10.719, 2.534), radius=0.7713802573752532),
-                 Circle(center=Point(2.366, 8.363), radius=0.40761088424835956),
-                 Circle(center=Point(2.231, 1.364), radius=0.31515878079948034),
-                 Circle(center=Point(6.584, 3.075), radius=0.43133037649949135),
-                 Circle(center=Point(5.439, 5.046), radius=0.7066478940041843),
-                 Circle(center=Point(1.140, 5.818), radius=0.780481186767859),
-                 Circle(center=Point(5.285, 2.724), radius=0.7884462013081022),
-                 Circle(center=Point(1.976, 0.762), radius=0.7106565743351528),
-                 Circle(center=Point(4.081, 2.656), radius=0.625537327712281)]
-    point_a = Point(8.396, 0.045)
-    point_b = Point(1.087, 9.189)
+
 
     print("obstacles=",obstacles)
     print("point_a=",point_a)
@@ -105,6 +89,11 @@ if __name__ == "__main__":
     planner = PathPlanner(world=world, max_iterations=5000)
     path = planner.plan(point_a, point_b)
     plot.plot_world_and_path(world, path)
+
+    path = []
+    if not path:
+        rrt = RRT(world)
+        path = rrt.plan(point_a, point_b)
 
     if path:
         print("Caminho encontrado:")
